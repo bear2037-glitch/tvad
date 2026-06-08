@@ -135,6 +135,12 @@ def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
     # BOM 제거 및 정규화
     raw_text = raw_text.lstrip("﻿").strip()
 
+    # 헤더 자동 감지: 첫 줄에 '관리번호'가 없으면 헤더 자동 추가
+    DEFAULT_HEADER = "관리번호\tM code\t메인카피\t서브카피\t아이템명\t비고"
+    first_line_cols = [c.strip() for c in raw_text.split("\n")[0].split("\t")]
+    if "관리번호" not in first_line_cols:
+        raw_text = DEFAULT_HEADER + "\n" + raw_text
+
     try:
         df_origin = pd.read_csv(io.StringIO(raw_text), sep="\t")
     except Exception as e:
@@ -147,7 +153,6 @@ def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
     missing = [c for c in required if c not in df_origin.columns]
     if missing:
         detected = list(df_origin.columns)
-        # 컬럼이 1개면 탭이 아닌 구분자로 붙여넣기된 것
         if len(detected) == 1:
             preview = detected[0][:80]
             return None, [
@@ -158,7 +163,7 @@ def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
         return None, [
             f"필수 컬럼 없음: {missing}\n"
             f"감지된 컬럼 ({len(detected)}개): {detected}\n"
-            f"← 컬럼명이 정확히 일치하는지 확인하세요."
+            f"← 컬럼 순서: 관리번호 / M code / 메인카피 / 서브카피 / 아이템명 / 비고"
         ]
 
     df_origin["M code"] = df_origin["M code"].fillna("").astype(str).str.strip()
@@ -326,11 +331,12 @@ tab1, tab2, tab3 = st.tabs(["📥 데이터 입력", "📊 편성대시보드", 
 
 # ══ TAB 1 ════════════════════════════════════════════════════════════════
 with tab1:
-    st.caption("엑셀에서 복사(Ctrl+C) 후 아래에 붙여넣기(Ctrl+V) 하세요.")
+    st.caption("엑셀에서 데이터 행만 선택(헤더 없어도 됨) → Ctrl+C 후 아래에 Ctrl+V")
+    st.caption("컬럼 순서: **관리번호 / M code / 메인카피 / 서브카피 / 아이템명 / 비고**")
     raw_input = st.text_area(
         "원본 데이터",
         height=280,
-        placeholder="관리번호\tM code\t메인카피\t서브카피\t아이템명\t비고\n...",
+        placeholder="M_26_0893\t77799317\t\t\t에어룸냉감침구\t특가오늘⑨:6/20, TV인기상품⑫:6/17\n...",
         label_visibility="collapsed",
     )
 
