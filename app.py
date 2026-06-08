@@ -7,6 +7,24 @@ from supabase import create_client, Client
 
 st.set_page_config(page_title="편성현황 관리", page_icon="📋", layout="wide")
 
+# ── 비밀번호 게이트 ───────────────────────────────────────────────────────
+
+def check_password() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
+    st.title("📋 편성현황 관리 시스템")
+    pw = st.text_input("비밀번호를 입력하세요", type="password")
+    if st.button("확인", type="primary"):
+        if pw == st.secrets.get("APP_PASSWORD", ""):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+    return False
+
+if not check_password():
+    st.stop()
+
 # ── 상수 ─────────────────────────────────────────────────────────────────
 
 TABLE = "tvad_schedule"
