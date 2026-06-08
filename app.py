@@ -106,6 +106,7 @@ def load_from_db() -> pd.DataFrame | None:
             .order("date_str")
             .order("slot")
             .order("m_code")
+            .limit(100_000)
             .execute()
         )
         if not res.data:
