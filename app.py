@@ -3,13 +3,23 @@ import pandas as pd
 import io
 import re
 import datetime
+import hashlib
 from supabase import create_client, Client
 
 st.set_page_config(page_title="편성현황 관리", page_icon="📋", layout="wide")
 
 # ── 비밀번호 게이트 ───────────────────────────────────────────────────────
 
+def _auth_token() -> str:
+    pw = st.secrets.get("APP_PASSWORD", "")
+    return hashlib.sha256(pw.encode()).hexdigest()[:24]
+
 def check_password() -> bool:
+    token = _auth_token()
+    # URL 쿼리 파라미터 체크 (서버 재시작 후에도 유지됨)
+    if st.query_params.get("auth") == token:
+        st.session_state.authenticated = True
+        return True
     if st.session_state.get("authenticated"):
         return True
     st.title("📋 편성현황 관리 시스템")
@@ -17,6 +27,7 @@ def check_password() -> bool:
     if st.button("확인", type="primary"):
         if pw == st.secrets.get("APP_PASSWORD", ""):
             st.session_state.authenticated = True
+            st.query_params["auth"] = token
             st.rerun()
         else:
             st.error("비밀번호가 틀렸습니다.")
@@ -121,15 +132,34 @@ def update_code_bulk(mgmt_no: str, code: str):
 def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
     errors: list[str] = []
 
+    # BOM 제거 및 정규화
+    raw_text = raw_text.lstrip("﻿").strip()
+
     try:
-        df_origin = pd.read_csv(io.StringIO(raw_text.strip()), sep="\t")
+        df_origin = pd.read_csv(io.StringIO(raw_text), sep="\t")
     except Exception as e:
         return None, [f"데이터 로드 실패: {e}"]
+
+    # 컬럼명 앞뒤 공백 제거
+    df_origin.columns = df_origin.columns.str.strip()
 
     required = ["관리번호", "M code", "아이템명", "비고"]
     missing = [c for c in required if c not in df_origin.columns]
     if missing:
-        return None, [f"필수 컬럼 없음: {missing}  ← 탭(Tab) 구분 복사 여부를 확인하세요."]
+        detected = list(df_origin.columns)
+        # 컬럼이 1개면 탭이 아닌 구분자로 붙여넣기된 것
+        if len(detected) == 1:
+            preview = detected[0][:80]
+            return None, [
+                f"탭(Tab) 구분이 감지되지 않았습니다.\n"
+                f"첫 번째 행 미리보기: 「{preview}」\n"
+                f"엑셀에서 셀을 선택 후 Ctrl+C → 여기에 Ctrl+V 하셨나요?"
+            ]
+        return None, [
+            f"필수 컬럼 없음: {missing}\n"
+            f"감지된 컬럼 ({len(detected)}개): {detected}\n"
+            f"← 컬럼명이 정확히 일치하는지 확인하세요."
+        ]
 
     df_origin["M code"] = df_origin["M code"].fillna("").astype(str).str.strip()
     for col in ["메인카피", "서브카피"]:
