@@ -4,6 +4,7 @@ import io
 import re
 import datetime
 import hashlib
+import json
 from supabase import create_client, Client
 
 st.set_page_config(page_title="편성현황 관리", page_icon="📋", layout="wide")
@@ -39,6 +40,7 @@ if not check_password():
 # ── 상수 ─────────────────────────────────────────────────────────────────
 
 TABLE = "tvad_schedule"
+CONFIG_TABLE = "tvad_config"
 
 # Supabase 컬럼명 ↔ 앱 컬럼명
 DB_TO_APP: dict[str, str] = {
@@ -55,10 +57,10 @@ DB_TO_APP: dict[str, str] = {
 APP_TO_DB: dict[str, str] = {v: k for k, v in DB_TO_APP.items()}
 APP_COL_ORDER = list(DB_TO_APP.values())
 
-RESTRICTED_GROUPS = {
-    "메인그룹":    ["MD선정추천", "TV인기상품"],
-    "카테고리그룹": ["카테고리MD추천", "카테고리베스트"],
-}
+DEFAULT_GROUPS = [
+    {"name": "A그룹", "keywords": ["MD선정추천", "TV인기상품"]},
+    {"name": "B그룹", "keywords": ["카테고리MD추천", "카테고리베스트"]},
+]
 
 
 # ── Supabase 클라이언트 ───────────────────────────────────────────────────
@@ -66,6 +68,32 @@ RESTRICTED_GROUPS = {
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+# ── 그룹 설정 로드/저장 ──────────────────────────────────────────────────
+
+def load_groups_from_db() -> list[dict]:
+    try:
+        res = (
+            get_supabase()
+            .table(CONFIG_TABLE)
+            .select("value")
+            .eq("key", "restricted_groups")
+            .execute()
+        )
+        if res.data:
+            return json.loads(res.data[0]["value"])
+    except Exception:
+        pass
+    return DEFAULT_GROUPS
+
+
+def save_groups_to_db(groups: list[dict]):
+    get_supabase().table(CONFIG_TABLE).upsert({
+        "key": "restricted_groups",
+        "value": json.dumps(groups, ensure_ascii=False),
+        "updated_at": datetime.datetime.utcnow().isoformat(),
+    }).execute()
 
 
 # ── DB 조작 ──────────────────────────────────────────────────────────────
@@ -129,7 +157,7 @@ def update_code_bulk(mgmt_no: str, code: str):
 
 # ── 파싱 ─────────────────────────────────────────────────────────────────
 
-def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
+def parse_schedule(raw_text: str, groups: list[dict] | None = None) -> tuple[pd.DataFrame | None, list[str]]:
     errors: list[str] = []
 
     # BOM 제거 및 정규화
@@ -242,8 +270,9 @@ def parse_schedule(raw_text: str) -> tuple[pd.DataFrame | None, list[str]]:
     dup_mask = result_df.duplicated(subset=["날짜", "구좌"], keep=False)
     result_df.loc[dup_mask, "체크_결과"] = "⚠️구좌중복"
 
+    active_groups = {g["name"]: g["keywords"] for g in (groups or [])}
     result_df["__group"] = result_df["구좌"].apply(
-        lambda ad: next((g for g, kws in RESTRICTED_GROUPS.items() if any(k in ad for k in kws)), None)
+        lambda ad: next((g for g, kws in active_groups.items() if any(k in ad for k in kws)), None)
     )
     valid = result_df["M code"].str.isdigit() & result_df["__group"].notna()
     grp_dup = result_df[valid].duplicated(subset=["날짜", "__group", "M code"], keep=False)
@@ -293,6 +322,8 @@ if "parse_errors" not in st.session_state:
     st.session_state.parse_errors = []
 if "pending_bulk" not in st.session_state:
     st.session_state.pending_bulk = []
+if "restricted_groups" not in st.session_state:
+    st.session_state.restricted_groups = load_groups_from_db()
 
 
 # ── 일괄 업데이트 다이얼로그 ─────────────────────────────────────────────
@@ -327,7 +358,7 @@ def bulk_confirm_dialog(change: dict):
 
 st.title("📋 편성현황 관리 시스템")
 
-tab1, tab2, tab3 = st.tabs(["📥 데이터 입력", "📊 편성대시보드", "✏️ 상세내역 & 코드 입력"])
+tab1, tab2, tab3, tab4 = st.tabs(["📥 데이터 입력", "📊 편성대시보드", "✏️ 상세내역 & 코드 입력", "⚙️ 그룹 설정"])
 
 # ══ TAB 1 ════════════════════════════════════════════════════════════════
 with tab1:
@@ -344,7 +375,7 @@ with tab1:
         if not raw_input.strip():
             st.warning("데이터를 붙여넣어 주세요.")
         else:
-            new_df, errors = parse_schedule(raw_input)
+            new_df, errors = parse_schedule(raw_input, st.session_state.restricted_groups)
 
             if new_df is None:
                 st.error("파싱 실패 — 아래 경고를 확인해주세요.")
@@ -483,3 +514,50 @@ with tab3:
                 else:
                     st.success(f"✅ {len(auto_apply)}건 저장 완료")
                     st.rerun()
+
+
+# ══ TAB 4 ════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("중복 그룹 설정")
+    st.caption(
+        "같은 그룹 내에서 동일 날짜에 동일 M code가 중복되면 🚫 경고가 뜹니다. "
+        "키워드는 구좌명에 **포함**되면 해당 그룹으로 인식합니다."
+    )
+
+    groups = st.session_state.restricted_groups
+    df_groups = pd.DataFrame([
+        {"그룹명": g["name"], "구좌 키워드 (쉼표로 구분)": ", ".join(g["keywords"])}
+        for g in groups
+    ])
+
+    edited_groups = st.data_editor(
+        df_groups,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "그룹명": st.column_config.TextColumn("그룹명", width="small"),
+            "구좌 키워드 (쉼표로 구분)": st.column_config.TextColumn(
+                "구좌 키워드 (쉼표로 구분)", width="large",
+                help="예: MD선정추천, TV인기상품"
+            ),
+        },
+    )
+
+    if st.button("💾 그룹 설정 저장", type="primary"):
+        new_groups = []
+        for _, row in edited_groups.iterrows():
+            name = str(row["그룹명"]).strip()
+            raw_kw = str(row["구좌 키워드 (쉼표로 구분)"]).strip()
+            kws = [k.strip() for k in raw_kw.split(",") if k.strip() and k.strip() not in ("nan", "None")]
+            if name and name not in ("nan", "None") and kws:
+                new_groups.append({"name": name, "keywords": kws})
+        if not new_groups:
+            st.warning("저장할 그룹이 없습니다. 그룹명과 키워드를 입력해주세요.")
+        else:
+            try:
+                save_groups_to_db(new_groups)
+                st.session_state.restricted_groups = new_groups
+                st.success(f"✅ {len(new_groups)}개 그룹 저장 완료")
+            except Exception as e:
+                st.error(f"저장 실패: {e}\n\nSupabase에 tvad_config 테이블이 없으면 setup.sql을 먼저 실행해주세요.")
