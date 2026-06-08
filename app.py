@@ -99,19 +99,30 @@ def save_groups_to_db(groups: list[dict]):
 
 def load_from_db() -> pd.DataFrame | None:
     try:
-        res = (
-            get_supabase()
-            .table(TABLE)
-            .select("*")
-            .order("date_str")
-            .order("slot")
-            .order("m_code")
-            .limit(100_000)
-            .execute()
-        )
-        if not res.data:
+        sb = get_supabase()
+        all_data: list[dict] = []
+        page = 1000  # PostgREST max-rows 기본값에 맞춰 페이지 단위 설정
+
+        offset = 0
+        while True:
+            res = (
+                sb.table(TABLE)
+                .select("*")
+                .order("date_str")
+                .order("slot")
+                .order("m_code")
+                .range(offset, offset + page - 1)
+                .execute()
+            )
+            batch = res.data or []
+            all_data.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
+
+        if not all_data:
             return None
-        df = pd.DataFrame(res.data).rename(columns=DB_TO_APP)
+        df = pd.DataFrame(all_data).rename(columns=DB_TO_APP)
         cols = APP_COL_ORDER + ["id"]
         return df[[c for c in cols if c in df.columns]].reset_index(drop=True)
     except Exception as e:
