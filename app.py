@@ -118,25 +118,65 @@ def load_from_db() -> pd.DataFrame | None:
         return None
 
 
-def save_all_to_db(df: pd.DataFrame):
-    sb = get_supabase()
-    # 전체 교체: 기존 삭제 후 신규 insert
-    sb.table(TABLE).delete().gte("id", 1).execute()
-    records = [
-        {
+def _build_records(df: pd.DataFrame, mcode_override: dict[str, str] | None = None) -> list[dict]:
+    placeholders = {"추후전달", "", "nan", "none"}
+    records = []
+    for _, row in df.iterrows():
+        mgmt_no = row["관리번호"]
+        m = str(row["M code"]).strip()
+        if mcode_override and m.lower() in placeholders and mgmt_no in mcode_override:
+            m = mcode_override[mgmt_no]
+        records.append({
             "date_str":     row["날짜"],
-            "mgmt_no":      row["관리번호"],
-            "m_code":       row["M code"],
+            "mgmt_no":      mgmt_no,
+            "m_code":       m,
             "item_name":    row["아이템명"],
             "main_copy":    row["메인카피"],
             "sub_copy":     row["서브카피"],
             "slot":         row["구좌"],
             "check_result": row["체크_결과"],
-        }
-        for _, row in df.iterrows()
-    ]
+        })
+    return records
+
+
+def upsert_to_db(df: pd.DataFrame) -> tuple[int, int]:
+    """관리번호 단위 upsert. (업데이트 수, 신규 수) 반환."""
+    sb = get_supabase()
+    mgmt_nos = df["관리번호"].unique().tolist()
+
+    # 기존에 실제 입력된 M code 보존 (추후전달 → 실제 코드로 덮어쓰기 방지)
+    mcode_override: dict[str, str] = {}
+    if st.session_state.result_df is not None:
+        placeholders = {"추후전달", "", "nan", "none"}
+        for _, row in st.session_state.result_df[
+            st.session_state.result_df["관리번호"].isin(mgmt_nos)
+        ].iterrows():
+            m = str(row["M code"]).strip()
+            mgmt = row["관리번호"]
+            if mgmt not in mcode_override and m.lower() not in placeholders:
+                mcode_override[mgmt] = m
+
+    # 기존에 있던 관리번호 파악 (업데이트 vs 신규 구분)
+    existing_nos = set()
+    if st.session_state.result_df is not None:
+        existing_nos = set(st.session_state.result_df["관리번호"].unique())
+    n_updated = len([m for m in mgmt_nos if m in existing_nos])
+    n_inserted = len(mgmt_nos) - n_updated
+
+    # 해당 관리번호 삭제 후 신규 삽입
+    for i in range(0, len(mgmt_nos), 50):
+        sb.table(TABLE).delete().in_("mgmt_no", mgmt_nos[i : i + 50]).execute()
+
+    records = _build_records(df, mcode_override)
     for i in range(0, len(records), 100):
         sb.table(TABLE).insert(records[i : i + 100]).execute()
+
+    return n_updated, n_inserted
+
+
+def clear_all_db():
+    """전체 초기화 (주의: 복구 불가)."""
+    get_supabase().table(TABLE).delete().gte("id", 1).execute()
 
 
 def update_mcode_single(row_id: int, code: str):
@@ -319,6 +359,8 @@ if "pending_bulk" not in st.session_state:
     st.session_state.pending_bulk = []
 if "restricted_groups" not in st.session_state:
     st.session_state.restricted_groups = load_groups_from_db()
+if "highlight_mgmt_nos" not in st.session_state:
+    st.session_state.highlight_mgmt_nos = set()
 
 
 # ── 일괄 업데이트 다이얼로그 ─────────────────────────────────────────────
@@ -436,16 +478,23 @@ with tab1:
                 st.error("파싱 실패 — 아래 경고를 확인해주세요.")
             else:
                 try:
-                    with st.spinner("DB 저장 중..."):
-                        save_all_to_db(new_df)
+                    with st.spinner("DB 업데이트 중..."):
+                        n_upd, n_new = upsert_to_db(new_df)
                         st.session_state.result_df = load_from_db()
+                    new_mgmt_nos = set(new_df["관리번호"].unique())
+                    st.session_state.highlight_mgmt_nos = new_mgmt_nos
                     st.session_state.parse_errors = errors
                     st.session_state.pending_bulk = []
-                    st.session_state.pop("slot_filter", None)  # 구좌 필터 리셋
+                    st.session_state.pop("slot_filter", None)
+
+                    parts = []
+                    if n_new:   parts.append(f"신규 {n_new}개")
+                    if n_upd:   parts.append(f"업데이트 {n_upd}개")
+                    label = " / ".join(parts) if parts else f"{len(new_mgmt_nos)}개"
+                    st.success(f"✅ 관리번호 {label} 처리 완료 ({len(new_df)}건)")
 
                     df_loaded = st.session_state.result_df
                     dup_count = int((df_loaded["체크_결과"] != "").sum()) if df_loaded is not None else 0
-                    st.success(f"✅ 파싱 완료: {len(new_df)}건 DB 저장됨")
                     if dup_count:
                         st.warning(f"중복 감지: {dup_count}건 → '상세내역' 탭에서 확인하세요.")
                 except Exception as e:
@@ -458,6 +507,16 @@ with tab1:
 
     if st.session_state.result_df is not None:
         st.info(f"현재 데이터: {len(st.session_state.result_df)}건 로드됨")
+
+    with st.expander("⚠️ 전체 데이터 초기화 (주의)"):
+        st.warning("DB의 모든 데이터가 삭제됩니다. 복구 불가합니다.")
+        if st.button("전체 삭제", type="secondary"):
+            clear_all_db()
+            st.session_state.result_df = None
+            st.session_state.highlight_mgmt_nos = set()
+            st.session_state.pop("slot_filter", None)
+            st.success("전체 데이터가 삭제되었습니다.")
+            st.rerun()
 
 
 # ══ TAB 2 ════════════════════════════════════════════════════════════════
@@ -474,8 +533,12 @@ with tab2:
         if df_view.empty:
             st.warning("선택된 구좌가 없습니다. 사이드바에서 구좌를 선택해주세요.")
         else:
+            recently = st.session_state.highlight_mgmt_nos
             matrix = df_view.copy()
             matrix["표시"] = matrix["아이템명"] + "\n" + matrix["M code"]
+            if recently:
+                is_new = matrix["관리번호"].isin(recently)
+                matrix.loc[is_new, "표시"] = "★ " + matrix.loc[is_new, "표시"]
             has_issue = matrix["체크_결과"] != ""
             matrix.loc[has_issue, "표시"] += "\n" + matrix.loc[has_issue, "체크_결과"]
 
@@ -509,7 +572,12 @@ with tab3:
         # 구좌 필터 적용
         sel3 = st.session_state.get("slot_filter", None)
         base_df = st.session_state.result_df
-        df_display = (base_df[base_df["구좌"].isin(sel3)] if sel3 is not None else base_df).drop(columns=["id"], errors="ignore")
+        df_display = (base_df[base_df["구좌"].isin(sel3)] if sel3 is not None else base_df).drop(columns=["id"], errors="ignore").copy()
+
+        # ★ 하이라이트 열 추가 (최근 업데이트 행 → 상단 정렬)
+        recently = st.session_state.highlight_mgmt_nos
+        df_display.insert(0, "★", df_display["관리번호"].isin(recently).map({True: "★", False: ""}))
+        df_display = df_display.sort_values("★", ascending=False)  # index 보존 (reset_index 안 함)
 
         readonly_cols = [c for c in df_display.columns if c != "M code"]
 
@@ -520,6 +588,7 @@ with tab3:
             height=500,
             hide_index=True,
             column_config={
+                "★":        st.column_config.TextColumn("★", width="small"),
                 "M code":   st.column_config.TextColumn("M code ✏️", max_chars=30),
                 "날짜":     st.column_config.TextColumn("날짜", width="small"),
                 "체크_결과": st.column_config.TextColumn("체크결과", width="medium"),
