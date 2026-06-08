@@ -51,7 +51,6 @@ DB_TO_APP: dict[str, str] = {
     "main_copy":    "메인카피",
     "sub_copy":     "서브카피",
     "slot":         "구좌",
-    "product_code": "상품코드",
     "check_result": "체크_결과",
 }
 APP_TO_DB: dict[str, str] = {v: k for k, v in DB_TO_APP.items()}
@@ -132,7 +131,6 @@ def save_all_to_db(df: pd.DataFrame):
             "main_copy":    row["메인카피"],
             "sub_copy":     row["서브카피"],
             "slot":         row["구좌"],
-            "product_code": str(row.get("상품코드", "") or ""),
             "check_result": row["체크_결과"],
         }
         for _, row in df.iterrows()
@@ -141,17 +139,17 @@ def save_all_to_db(df: pd.DataFrame):
         sb.table(TABLE).insert(records[i : i + 100]).execute()
 
 
-def update_code_single(row_id: int, code: str):
-    get_supabase().table(TABLE).update({"product_code": code}).eq("id", row_id).execute()
+def update_mcode_single(row_id: int, code: str):
+    get_supabase().table(TABLE).update({"m_code": code}).eq("id", row_id).execute()
     st.session_state.result_df.loc[
-        st.session_state.result_df["id"] == row_id, "상품코드"
+        st.session_state.result_df["id"] == row_id, "M code"
     ] = code
 
 
-def update_code_bulk(mgmt_no: str, code: str):
-    get_supabase().table(TABLE).update({"product_code": code}).eq("mgmt_no", mgmt_no).execute()
+def update_mcode_bulk(mgmt_no: str, code: str):
+    get_supabase().table(TABLE).update({"m_code": code}).eq("mgmt_no", mgmt_no).execute()
     st.session_state.result_df.loc[
-        st.session_state.result_df["관리번호"] == mgmt_no, "상품코드"
+        st.session_state.result_df["관리번호"] == mgmt_no, "M code"
     ] = code
 
 
@@ -255,7 +253,6 @@ def parse_schedule(raw_text: str, groups: list[dict] | None = None) -> tuple[pd.
                         "메인카피": str(row.get("메인카피", "")).strip(),
                         "서브카피": str(row.get("서브카피", "")).strip(),
                         "구좌":    ad_cleaned,
-                        "상품코드": "",
                         "체크_결과": "",
                     })
                 except ValueError as e:
@@ -294,9 +291,7 @@ def to_excel(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         export_df.to_excel(writer, sheet_name="상세내역", index=False)
         matrix = export_df.copy()
-        matrix["표시"] = matrix["아이템명"] + "\n(" + matrix["M code"] + ")"
-        has_code = matrix["상품코드"].str.strip() != ""
-        matrix.loc[has_code, "표시"] += "\n[" + matrix.loc[has_code, "상품코드"] + "]"
+        matrix["표시"] = matrix["아이템명"] + "\n" + matrix["M code"]
         try:
             pivot = matrix.pivot_table(
                 index="구좌", columns="날짜", values="표시",
@@ -331,34 +326,94 @@ if "restricted_groups" not in st.session_state:
 @st.dialog("🔄 일괄 업데이트 확인")
 def bulk_confirm_dialog(change: dict):
     관리번호 = change["관리번호"]
-    상품코드 = change["상품코드"]
+    m_code = change["M code"]
     df = st.session_state.result_df
     affected = df[df["관리번호"] == 관리번호][["날짜", "구좌", "아이템명"]].reset_index(drop=True)
 
     st.markdown(f"관리번호 **`{관리번호}`** 는 총 **{len(affected)}개 구좌**에 편성되어 있습니다.")
-    st.markdown(f"상품코드 **`{상품코드}`** 를 어떻게 적용할까요?")
+    st.markdown(f"M code **`{m_code}`** 를 어떻게 적용할까요?")
     st.dataframe(affected, use_container_width=True, hide_index=True)
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button(f"✅ 전체 {len(affected)}개 구좌 적용", type="primary", use_container_width=True):
             with st.spinner("DB 업데이트 중..."):
-                update_code_bulk(관리번호, 상품코드)
+                update_mcode_bulk(관리번호, m_code)
             st.session_state.pending_bulk.pop(0)
             st.rerun()
     with col2:
         if st.button("이 셀만 적용", use_container_width=True):
             with st.spinner("DB 업데이트 중..."):
-                update_code_single(change["id"], 상품코드)
+                update_mcode_single(change["id"], m_code)
             st.session_state.pending_bulk.pop(0)
             st.rerun()
+
+
+# ── 사이드바: 구좌 필터 ──────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## 구좌 필터")
+    if st.session_state.result_df is not None:
+        _df = st.session_state.result_df
+        all_slots = sorted(_df["구좌"].unique().tolist())
+        slot_counts = _df["구좌"].value_counts()
+
+        # 초기화 (데이터가 바뀌면 전체 선택으로 리셋)
+        if "slot_filter" not in st.session_state:
+            st.session_state.slot_filter = all_slots[:]
+
+        # 그룹 매핑 (색상 구분용)
+        grp_map: dict[str, str] = {}
+        for g in st.session_state.restricted_groups:
+            for s in all_slots:
+                if s not in grp_map and any(kw in s for kw in g["keywords"]):
+                    grp_map[s] = g["name"]
+
+        c1, c2 = st.columns(2)
+        if c1.button("전체 선택", use_container_width=True):
+            st.session_state.slot_filter = all_slots[:]
+            st.rerun()
+        if c2.button("전체 해제", use_container_width=True):
+            st.session_state.slot_filter = []
+            st.rerun()
+
+        # 구좌 목록 테이블
+        slot_info = pd.DataFrame([
+            {
+                "구좌": s,
+                "건수": int(slot_counts.get(s, 0)),
+                "그룹": grp_map.get(s, "—"),
+            }
+            for s in all_slots
+        ])
+        st.dataframe(
+            slot_info,
+            use_container_width=True,
+            hide_index=True,
+            height=min(38 * len(all_slots) + 38, 340),
+        )
+
+        # 현재 선택에 없는 구좌는 제거
+        valid_sel = [s for s in st.session_state.slot_filter if s in all_slots]
+        if len(valid_sel) != len(st.session_state.slot_filter):
+            st.session_state.slot_filter = all_slots[:]
+
+        st.multiselect(
+            "보고 싶은 구좌만 선택",
+            options=all_slots,
+            format_func=lambda s: f"{s}  ({int(slot_counts.get(s,0))}건)",
+            key="slot_filter",
+        )
+        st.caption(f"선택: {len(st.session_state.slot_filter)} / {len(all_slots)}개")
+    else:
+        st.caption("데이터를 먼저 파싱해주세요.")
 
 
 # ── 메인 UI ──────────────────────────────────────────────────────────────
 
 st.title("📋 편성현황 관리 시스템")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📥 데이터 입력", "📊 편성대시보드", "✏️ 상세내역 & 코드 입력", "⚙️ 그룹 설정"])
+tab1, tab2, tab3, tab4 = st.tabs(["📥 데이터 입력", "📊 편성대시보드", "✏️ 상세내역 & M code 수정", "⚙️ 그룹 설정"])
 
 # ══ TAB 1 ════════════════════════════════════════════════════════════════
 with tab1:
@@ -380,20 +435,13 @@ with tab1:
             if new_df is None:
                 st.error("파싱 실패 — 아래 경고를 확인해주세요.")
             else:
-                # 기존 상품코드 보존 (관리번호 기준)
-                if st.session_state.result_df is not None:
-                    old_codes = (
-                        st.session_state.result_df
-                        .groupby("관리번호")["상품코드"].first().to_dict()
-                    )
-                    new_df["상품코드"] = new_df["관리번호"].map(old_codes).fillna("")
-
                 try:
                     with st.spinner("DB 저장 중..."):
                         save_all_to_db(new_df)
                         st.session_state.result_df = load_from_db()
                     st.session_state.parse_errors = errors
                     st.session_state.pending_bulk = []
+                    st.session_state.pop("slot_filter", None)  # 구좌 필터 리셋
 
                     df_loaded = st.session_state.result_df
                     dup_count = int((df_loaded["체크_결과"] != "").sum()) if df_loaded is not None else 0
@@ -418,21 +466,27 @@ with tab2:
         st.info("'데이터 입력' 탭에서 데이터를 먼저 파싱해주세요.")
     else:
         df = st.session_state.result_df
-        matrix = df.copy()
-        matrix["표시"] = matrix["아이템명"]
-        has_code = matrix["상품코드"].str.strip() != ""
-        matrix.loc[has_code, "표시"] += " [" + matrix.loc[has_code, "상품코드"] + "]"
-        has_issue = df["체크_결과"] != ""
-        matrix.loc[has_issue, "표시"] += " " + df.loc[has_issue, "체크_결과"]
 
-        try:
-            pivot = matrix.pivot_table(
-                index="구좌", columns="날짜", values="표시",
-                aggfunc=lambda x: " / ".join(x.astype(str)),
-            )
-            st.dataframe(pivot, use_container_width=True, height=500)
-        except Exception as e:
-            st.error(f"대시보드 오류: {e}")
+        # 구좌 필터 적용
+        sel = st.session_state.get("slot_filter", None)
+        df_view = df[df["구좌"].isin(sel)] if sel is not None else df
+
+        if df_view.empty:
+            st.warning("선택된 구좌가 없습니다. 사이드바에서 구좌를 선택해주세요.")
+        else:
+            matrix = df_view.copy()
+            matrix["표시"] = matrix["아이템명"] + "\n" + matrix["M code"]
+            has_issue = matrix["체크_결과"] != ""
+            matrix.loc[has_issue, "표시"] += "\n" + matrix.loc[has_issue, "체크_결과"]
+
+            try:
+                pivot = matrix.pivot_table(
+                    index="구좌", columns="날짜", values="표시",
+                    aggfunc=lambda x: " / ".join(x.astype(str)),
+                )
+                st.dataframe(pivot, use_container_width=True, height=500)
+            except Exception as e:
+                st.error(f"대시보드 오류: {e}")
 
         st.download_button(
             "📥 엑셀 다운로드",
@@ -450,10 +504,14 @@ with tab3:
         if st.session_state.pending_bulk:
             bulk_confirm_dialog(st.session_state.pending_bulk[0])
 
-        st.caption("**상품코드** 컬럼만 입력/수정 가능합니다. 수정 후 반드시 **저장** 버튼을 눌러주세요.")
+        st.caption("**M code** 컬럼만 수정 가능합니다. 수정 후 반드시 **저장** 버튼을 눌러주세요.")
 
-        df_display = st.session_state.result_df.drop(columns=["id"], errors="ignore")
-        readonly_cols = [c for c in df_display.columns if c != "상품코드"]
+        # 구좌 필터 적용
+        sel3 = st.session_state.get("slot_filter", None)
+        base_df = st.session_state.result_df
+        df_display = (base_df[base_df["구좌"].isin(sel3)] if sel3 is not None else base_df).drop(columns=["id"], errors="ignore")
+
+        readonly_cols = [c for c in df_display.columns if c != "M code"]
 
         edited_df = st.data_editor(
             df_display,
@@ -462,8 +520,8 @@ with tab3:
             height=500,
             hide_index=True,
             column_config={
-                "상품코드": st.column_config.TextColumn("상품코드 ✏️", max_chars=50),
-                "날짜":    st.column_config.TextColumn("날짜", width="small"),
+                "M code":   st.column_config.TextColumn("M code ✏️", max_chars=30),
+                "날짜":     st.column_config.TextColumn("날짜", width="small"),
                 "체크_결과": st.column_config.TextColumn("체크결과", width="medium"),
             },
             key="detail_editor",
@@ -471,28 +529,29 @@ with tab3:
 
         if st.button("💾 저장", type="primary"):
             original = st.session_state.result_df
+            # display index → original index 매핑
+            display_index = df_display.index
             changes: list[dict] = []
 
-            for idx in edited_df.index:
-                관리번호 = str(edited_df.loc[idx, "관리번호"]).strip()
+            for pos, orig_idx in enumerate(display_index):
+                관리번호 = str(edited_df.iloc[pos]["관리번호"]).strip()
                 if not 관리번호 or 관리번호 in ("nan", "None", ""):
                     continue
 
-                orig_code = str(original.loc[idx, "상품코드"]).strip()
-                new_code  = str(edited_df.loc[idx, "상품코드"]).strip()
+                orig_mcode = str(original.loc[orig_idx, "M code"]).strip()
+                new_mcode  = str(edited_df.iloc[pos]["M code"]).strip()
 
-                if new_code != orig_code:
+                if new_mcode != orig_mcode:
                     changes.append({
-                        "idx":   idx,
-                        "id":    int(original.loc[idx, "id"]),
-                        "관리번호": 관리번호,
-                        "상품코드": new_code,
+                        "orig_idx": orig_idx,
+                        "id":       int(original.loc[orig_idx, "id"]),
+                        "관리번호":  관리번호,
+                        "M code":   new_mcode,
                     })
 
             if not changes:
                 st.info("변경된 내용이 없습니다.")
             else:
-                # 같은 관리번호 중복 편집 시 마지막 값으로 통합
                 seen: dict[str, dict] = {}
                 for c in changes:
                     seen[c["관리번호"]] = c
@@ -506,7 +565,7 @@ with tab3:
                 if auto_apply:
                     with st.spinner("저장 중..."):
                         for c in auto_apply:
-                            update_code_single(c["id"], c["상품코드"])
+                            update_mcode_single(c["id"], c["M code"])
 
                 if needs_confirm:
                     st.session_state.pending_bulk = needs_confirm
