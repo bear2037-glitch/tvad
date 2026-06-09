@@ -412,26 +412,12 @@ with st.sidebar:
         all_slots = sorted(_df["구좌"].unique().tolist())
         slot_counts = _df["구좌"].value_counts()
 
-        # 초기화 (데이터가 바뀌면 전체 선택으로 리셋)
-        if "slot_filter" not in st.session_state:
-            st.session_state.slot_filter = all_slots[:]
-
-        # 그룹 매핑 (색상 구분용)
         grp_map: dict[str, str] = {}
         for g in st.session_state.restricted_groups:
             for s in all_slots:
                 if s not in grp_map and any(kw in s for kw in g["keywords"]):
                     grp_map[s] = g["name"]
 
-        c1, c2 = st.columns(2)
-        if c1.button("전체 선택", use_container_width=True):
-            st.session_state.slot_filter = all_slots[:]
-            st.rerun()
-        if c2.button("전체 해제", use_container_width=True):
-            st.session_state.slot_filter = []
-            st.rerun()
-
-        # 구좌 목록 테이블
         slot_info = pd.DataFrame([
             {
                 "구좌": s,
@@ -440,25 +426,41 @@ with st.sidebar:
             }
             for s in all_slots
         ])
-        st.dataframe(
+
+        # 버튼: 전체선택/전체해제 → _slot_sel 키를 직접 조작 후 rerun
+        c1, c2 = st.columns(2)
+        if c1.button("전체 선택", use_container_width=True):
+            st.session_state["_slot_sel"] = {
+                "selection": {"rows": list(range(len(all_slots))), "columns": []}
+            }
+            st.rerun()
+        if c2.button("전체 해제", use_container_width=True):
+            st.session_state["_slot_sel"] = {
+                "selection": {"rows": [], "columns": []}
+            }
+            st.rerun()
+
+        # 첫 진입 또는 데이터 리셋 시 전체 선택 상태로 초기화
+        if "_slot_sel" not in st.session_state:
+            st.session_state["_slot_sel"] = {
+                "selection": {"rows": list(range(len(all_slots))), "columns": []}
+            }
+
+        st.caption("행을 클릭하면 선택/해제됩니다.")
+        sel_result = st.dataframe(
             slot_info,
             use_container_width=True,
             hide_index=True,
-            height=min(38 * len(all_slots) + 38, 340),
+            height=min(40 * len(all_slots) + 40, 460),
+            selection_mode="multi-row",
+            on_select="rerun",
+            key="_slot_sel",
         )
 
-        # 현재 선택에 없는 구좌는 제거
-        valid_sel = [s for s in st.session_state.slot_filter if s in all_slots]
-        if len(valid_sel) != len(st.session_state.slot_filter):
-            st.session_state.slot_filter = all_slots[:]
-
-        st.multiselect(
-            "보고 싶은 구좌만 선택",
-            options=all_slots,
-            format_func=lambda s: f"{s}  ({int(slot_counts.get(s,0))}건)",
-            key="slot_filter",
-        )
-        st.caption(f"선택: {len(st.session_state.slot_filter)} / {len(all_slots)}개")
+        selected_rows = sel_result.selection.rows
+        selected_slots = [all_slots[i] for i in selected_rows if i < len(all_slots)]
+        st.session_state.slot_filter = selected_slots
+        st.caption(f"선택: {len(selected_slots)} / {len(all_slots)}개")
     else:
         st.caption("데이터를 먼저 파싱해주세요.")
 
@@ -498,6 +500,7 @@ with tab1:
                     st.session_state.parse_errors = errors
                     st.session_state.pending_bulk = []
                     st.session_state.pop("slot_filter", None)
+                    st.session_state.pop("_slot_sel", None)
 
                     parts = []
                     if n_new:   parts.append(f"신규 {n_new}개")
@@ -527,6 +530,7 @@ with tab1:
             st.session_state.result_df = None
             st.session_state.highlight_mgmt_nos = set()
             st.session_state.pop("slot_filter", None)
+            st.session_state.pop("_slot_sel", None)
             st.success("전체 데이터가 삭제되었습니다.")
             st.rerun()
 
